@@ -2,6 +2,9 @@
 
 const BaseKeyType = require('./base_key_type');
 
+const logger = require('./logger');
+const loggerChild = logger.getLogger().child({ module: 'session_record' });
+
 const CLOSED_SESSIONS_MAX = 40;
 const SESSION_RECORD_VERSION = 'v1';
 
@@ -170,9 +173,9 @@ const migrations = [{
         } else {
             for (const key in sessions) {
                 if (sessions[key].indexInfo.closed === -1) {
-                    console.error('V1 session storage migration error: registrationId',
-                        data.registrationId, 'for open session version',
-                        data.version);
+                    loggerChild.error(
+                        { data }, 'V1 session storage migration error: registrationId ** for open session version **'
+                    );
                 }
             }
         }
@@ -190,7 +193,7 @@ class SessionRecord {
         let run = (data.version === undefined);
         for (let i = 0; i < migrations.length; ++i) {
             if (run) {
-                console.info("Migrating session to:", migrations[i].version);
+                loggerChild.info({ migration: migrations[i] }, "Migrating session to");
                 migrations[i].migrate(data);
             } else if (migrations[i].version === data.version) {
                 run = true;
@@ -237,6 +240,7 @@ class SessionRecord {
 
     getSession(key) {
         assertBuffer(key);
+        this.detectDuplicateOpenSessions();
         const session = this.sessions[key.toString('base64')];
         if (session && session.indexInfo.baseKeyType === BaseKeyType.OURS) {
             throw new Error("Tried to lookup a session using our basekey");
@@ -245,6 +249,7 @@ class SessionRecord {
     }
 
     getOpenSession() {
+        this.detectDuplicateOpenSessions();
         for (const session of Object.values(this.sessions)) {
             if (!this.isClosed(session)) {
                 return session;
@@ -267,23 +272,38 @@ class SessionRecord {
 
     closeSession(session) {
         if (this.isClosed(session)) {
-            console.warn("Session already closed", session);
+            loggerChild.warn({ session }, "Session already closed");
             return;
         }
-        console.info("Closing session:", session);
+        loggerChild.info({ session }, "Closing session");
         session.indexInfo.closed = Date.now();
     }
 
     openSession(session) {
         if (!this.isClosed(session)) {
-            console.warn("Session already open");
+            loggerChild.warn("Session already open");
         }
-        console.info("Opening session:", session);
+        loggerChild.info({ session }, "Opening session");
         session.indexInfo.closed = -1;
     }
 
     isClosed(session) {
         return session.indexInfo.closed !== -1;
+    }
+
+    updateSessionState(session) {
+        // this.removeOldChains(session);
+        this.setSession(session);
+        this.removeOldSessions();
+
+    }
+
+    archiveCurrentState() {
+        let open_session = this.getOpenSession();
+        if (open_session !== undefined) {
+            this.closeSession(open_session);
+            this.updateSessionState(open_session);
+        }
     }
 
     removeOldSessions() {
@@ -298,7 +318,7 @@ class SessionRecord {
                 }
             }
             if (oldestKey) {
-                console.info("Removing old closed session:", oldestSession);
+                loggerChild.info({ oldestSession }, "Removing old closed session");
                 delete this.sessions[oldestKey];
             } else {
                 throw new Error('Corrupt sessions object');
@@ -307,8 +327,19 @@ class SessionRecord {
     }
 
     deleteAllSessions() {
-        for (const key of Object.keys(this.sessions)) {
-            delete this.sessions[key];
+        this.sessions = {};
+    }
+
+    detectDuplicateOpenSessions() {
+        let openSession;
+        let sessions = this.sessions;
+        for (const key in sessions) {
+            if (!this.isClosed(sessions[key])) {
+                if (openSession !== undefined) {
+                    throw new Error("Datastore inconsistensy: multiple open sessions");
+                }
+                openSession = sessions[key];
+            }
         }
     }
 }
