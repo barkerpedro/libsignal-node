@@ -8,17 +8,16 @@ const crypto = require('./crypto');
 const curve = require('./curve');
 const errors = require('./errors');
 const queueJob = require('./queue_job');
-const Util = require('./util');
-const logger = require('./logger');
+
 
 class SessionBuilder {
 
     constructor(storage, protocolAddress) {
         this.addr = protocolAddress;
         this.storage = storage;
-        this.logger = logger.getLogger().child({ module: 'session_builder' });
     }
 
+    // async initOutgoing(device, onlyMemory = false) { // TESTE Z-API
     async initOutgoing(device) {
         const fqAddr = this.addr.toString();
         return await queueJob(fqAddr, async () => {
@@ -39,18 +38,18 @@ class SessionBuilder {
             if (device.preKey) {
                 session.pendingPreKey.preKeyId = device.preKey.keyId;
             }
+            // let record = await this.storage.loadSession(fqAddr, onlyMemory); // TESTE Z-API
             let record = await this.storage.loadSession(fqAddr);
             if (!record) {
                 record = new SessionRecord();
+            } else {
+                const openSession = record.getOpenSession();
+                if (openSession) {
+                    console.warn("Closing stale open session for new outgoing prekey bundle");
+                    record.closeSession(openSession);
+                }
             }
-            const openSession = record.getOpenSession();
-            record.archiveCurrentState();
-            if (openSession && session && !Util.isEqual(openSession.indexInfo.remoteIdentityKey, session.indexInfo.remoteIdentityKey)) {
-                console.warn("Deleting all sessions because identity has changed");
-                this.logger.warn("Closing stale open session for new outgoing prekey bundle");
-                record.deleteAllSessions();
-            }
-            record.updateSessionState(session);
+            record.setSession(session);
             await this.storage.storeSession(fqAddr, record);
         });
     }
@@ -64,31 +63,22 @@ class SessionBuilder {
             // This just means we haven't replied.
             return;
         }
-        const [preKeyPair, signedPreKeyPair] = await Promise.all([
-            this.storage.loadPreKey(message.preKeyId),
-            this.storage.loadSignedPreKey(message.signedPreKeyId)
-        ]);
-        const existingOpenSession = record.getOpenSession();
-        if (!signedPreKeyPair) {
-            if (existingOpenSession && existingOpenSession.currentRatchet) return;
-            throw new errors.PreKeyError("Missing Signed PreKey for PreKeyWhisperMessage");
-        }
-        if (existingOpenSession) {
-            this.logger.warn("Closing open session in favor of incoming prekey bundle");
-            record.archiveCurrentState();
-        }
+        const preKeyPair = await this.storage.loadPreKey(message.preKeyId);
         if (message.preKeyId && !preKeyPair) {
-            throw new errors.PreKeyError("Invalid PreKey ID");
+            throw new errors.PreKeyError('Invalid PreKey ID');
         }
-        const session = await this.initSession(false, preKeyPair, signedPreKeyPair,
+        const signedPreKeyPair = await this.storage.loadSignedPreKey(message.signedPreKeyId);
+        if (!signedPreKeyPair) {
+            throw new errors.PreKeyError("Missing SignedPreKey");
+        }
+        const existingOpenSession = record.getOpenSession();
+        if (existingOpenSession) {
+            console.warn("Closing open session in favor of incoming prekey bundle");
+            record.closeSession(existingOpenSession);
+        }
+        record.setSession(await this.initSession(false, preKeyPair, signedPreKeyPair,
             message.identityKey, message.baseKey,
-            undefined, message.registrationId);
-        if (existingOpenSession && session && !Util.isEqual(existingOpenSession.indexInfo.remoteIdentityKey, session.indexInfo.remoteIdentityKey)) {
-            console.warn("Deleting all sessions because identity has changed");
-            record.deleteAllSessions();
-        }
-        record.updateSessionState(session);
-        // this.storage.saveIdentity
+            undefined, message.registrationId));
         return message.preKeyId;
     }
 
