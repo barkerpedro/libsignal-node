@@ -267,7 +267,7 @@ class SessionRecord {
 
     closeSession(session) {
         if (this.isClosed(session)) {
-            console.warn("Session already closed", session);
+            console.log("Session already closed", session);
             return;
         }
         console.info("Closing session:", session);
@@ -276,7 +276,7 @@ class SessionRecord {
 
     openSession(session) {
         if (!this.isClosed(session)) {
-            console.warn("Session already open");
+            console.log("Session already open");
         }
         console.info("Opening session:", session);
         session.indexInfo.closed = -1;
